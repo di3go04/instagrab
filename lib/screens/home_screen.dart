@@ -2,13 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/instagram_service.dart';
 import '../services/image_service.dart';
+import '../services/library_service.dart';
 import 'editor_screen.dart';
+import 'settings_screen.dart';
 
-/// Home screen with URL input for Instagram image extraction.
-///
-/// Accepts Instagram share URLs via text input or clipboard paste,
-/// extracts image URLs from the post, downloads them, and navigates
-/// to the editor screen for crop/resize operations.
+/// Home screen: paste an Instagram URL, download into the library, or
+/// open the library directly to re-edit previously grabbed images.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -30,7 +29,6 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  /// Pastes clipboard content into the URL field.
   Future<void> _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null && data!.text!.isNotEmpty) {
@@ -41,19 +39,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Main extraction flow: validate URL → extract image URLs → download → edit.
   Future<void> _processUrl() async {
     final input = _urlController.text.trim();
     if (input.isEmpty) {
       setState(() => _error = 'Please enter an Instagram URL');
       return;
     }
-
-    final normalized = InstagramService.normalizeUrl(input);
-    if (normalized == null) {
+    final canonical = InstagramService.normalizeUrl(input);
+    if (canonical == null) {
       setState(() => _error = 'Not a valid Instagram post URL');
       return;
     }
+    final shortcode = RegExp(r'/p/([^/]+)/').firstMatch(canonical)!.group(1)!;
 
     setState(() {
       _loading = true;
@@ -62,9 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      // Step 1: Extract image URLs from the post
       final imageUrls = await InstagramService.extractImageUrls(input);
-
       if (imageUrls.isEmpty) {
         setState(() {
           _loading = false;
@@ -73,29 +68,27 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      setState(() => _status = 'Downloading image (1/${imageUrls.length})...');
-
-      // Step 2: Download all images
-      final downloadedImages = <DownloadedImage>[];
-
+      final added = <LibraryImage>[];
       for (var i = 0; i < imageUrls.length; i++) {
         setState(() {
           _status = 'Downloading image (${i + 1}/${imageUrls.length})...';
         });
-
         try {
           final bytes = await ImageService.downloadImage(imageUrls[i]);
-          downloadedImages.add(DownloadedImage(
-            url: imageUrls[i],
+          final entry = await LibraryService.add(
             bytes: bytes,
-          ));
+            sourceUrl: canonical,
+            shortcode: shortcode,
+            carouselIndex: i,
+          );
+          added.add(entry);
         } catch (e) {
-          // Skip images that fail to download, continue with others
-          print('Failed to download image ${i + 1}: $e');
+          // Skip failures on individual carousel frames
+          debugPrint('Failed to grab image ${i + 1}: $e');
         }
       }
 
-      if (downloadedImages.isEmpty) {
+      if (added.isEmpty) {
         setState(() {
           _loading = false;
           _error = 'Failed to download any images from this post';
@@ -105,11 +98,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() => _loading = false);
 
-      // Step 3: Navigate to editor
       if (mounted) {
-        Navigator.of(context).push(
+        await Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (_) => EditorScreen(images: downloadedImages),
+            builder: (_) => EditorScreen(initialImageId: added.first.id),
           ),
         );
       }
@@ -126,6 +118,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _openLibrary() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const EditorScreen()),
+    );
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -134,6 +138,13 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('InstaGrab'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: _openSettings,
+          ),
+        ],
       ),
       body: Center(
         child: SingleChildScrollView(
@@ -144,7 +155,6 @@ class _HomeScreenState extends State<HomeScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // App icon / header
                 Icon(
                   Icons.photo_library_outlined,
                   size: 64,
@@ -160,15 +170,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Paste an Instagram share URL to download, crop, and resize images.',
+                  'Paste an Instagram share URL to add it to your library, '
+                  'or open the library to re-edit past grabs.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
-
-                // URL input
                 TextField(
                   controller: _urlController,
                   focusNode: _focusNode,
@@ -189,8 +198,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   onSubmitted: (_) => _processUrl(),
                 ),
                 const SizedBox(height: 16),
-
-                // Grab button
                 FilledButton.icon(
                   onPressed: _loading ? null : _processUrl,
                   icon: _loading
@@ -203,38 +210,21 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         )
                       : const Icon(Icons.download),
-                  label: Text(_loading ? (_status ?? 'Processing...') : 'Grab Images'),
+                  label: Text(
+                    _loading ? (_status ?? 'Processing...') : 'Grab Images',
+                  ),
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     textStyle: theme.textTheme.titleMedium,
                   ),
                 ),
-
-                const SizedBox(height: 24),
-
-                // Usage hints
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'How to use',
-                          style: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        _hintRow(Icons.share, 'Open Instagram → tap Share → Copy Link'),
-                        const SizedBox(height: 4),
-                        _hintRow(Icons.paste, 'Paste the link above'),
-                        const SizedBox(height: 4),
-                        _hintRow(Icons.crop, 'Crop and resize to your needs'),
-                        const SizedBox(height: 4),
-                        _hintRow(Icons.save_alt, 'Save to your device'),
-                      ],
-                    ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _loading ? null : _openLibrary,
+                  icon: const Icon(Icons.collections_outlined),
+                  label: const Text('Open Library'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
                 ),
               ],
@@ -244,27 +234,4 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-
-  Widget _hintRow(IconData icon, String text) {
-    return Row(
-      children: [
-        Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(text, style: Theme.of(context).textTheme.bodySmall),
-        ),
-      ],
-    );
-  }
-}
-
-/// Holds a downloaded image's source URL and raw bytes.
-class DownloadedImage {
-  /// The CDN URL the image was fetched from.
-  final String url;
-
-  /// Raw image bytes (JPEG/PNG/WebP as received).
-  final Uint8List bytes;
-
-  const DownloadedImage({required this.url, required this.bytes});
 }

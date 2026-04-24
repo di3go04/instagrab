@@ -1,49 +1,56 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:crop_your_image/crop_your_image.dart';
+import 'package:crop_your_image/crop_your_image.dart' hide ImageFormat;
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
 import '../services/image_service.dart';
-import 'home_screen.dart';
+import '../services/library_service.dart';
+import '../services/settings_service.dart';
+import 'settings_screen.dart';
 
-/// Image editor screen with cropping and resizing capabilities.
+/// Editor screen: crop + resize the selected library image.
 ///
-/// For carousel posts, displays a horizontal thumbnail strip to switch
-/// between images. The active image can be cropped interactively or
-/// resized to specific dimensions.
+/// Left rail is the full persistent library, newest-first. Center is the
+/// crop/resize editor. Right side is a collapsible metadata pane.
+/// Save writes to the user's settings-configured path/format with no
+/// prompts — every decision is pre-declared in Settings.
 class EditorScreen extends StatefulWidget {
-  /// List of downloaded images from the Instagram post.
-  final List<DownloadedImage> images;
+  /// If provided, the editor starts with this library entry selected.
+  /// Otherwise the newest entry is selected.
+  final String? initialImageId;
 
-  const EditorScreen({super.key, required this.images});
+  const EditorScreen({super.key, this.initialImageId});
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
 }
 
 class _EditorScreenState extends State<EditorScreen> {
-  int _currentIndex = 0;
-  final _cropController = CropController();
+  List<LibraryImage> _library = const [];
+  LibraryImage? _selected;
+  Uint8List? _originalBytes;
+  Uint8List? _editedBytes;
+  bool _loading = true;
   bool _isCropping = false;
   bool _isSaving = false;
-  Uint8List? _croppedBytes;
-  _EditorMode _mode = _EditorMode.crop;
+  bool _infoVisible = true;
 
-  // Resize controls
+  _EditorMode _mode = _EditorMode.crop;
+  final _cropController = CropController();
+  double? _cropAspectRatio;
+
   final _widthController = TextEditingController();
   final _heightController = TextEditingController();
   bool _maintainAspect = true;
   double? _originalAspect;
 
-  // Crop aspect ratio
-  double? _cropAspectRatio;
-
-  Uint8List get _activeBytes => _croppedBytes ?? widget.images[_currentIndex].bytes;
+  Uint8List? get _activeBytes => _editedBytes ?? _originalBytes;
 
   @override
   void initState() {
     super.initState();
-    _updateImageInfo();
+    _loadLibrary();
   }
 
   @override
@@ -53,99 +60,101 @@ class _EditorScreenState extends State<EditorScreen> {
     super.dispose();
   }
 
-  /// Updates dimension fields when switching images.
-  void _updateImageInfo() {
-    final decoded = img.decodeImage(_activeBytes);
-    if (decoded != null) {
-      _widthController.text = decoded.width.toString();
-      _heightController.text = decoded.height.toString();
-      _originalAspect = decoded.width / decoded.height;
+  Future<void> _loadLibrary() async {
+    final items = await LibraryService.list();
+    LibraryImage? initial;
+    if (widget.initialImageId != null) {
+      initial = items.firstWhere(
+        (e) => e.id == widget.initialImageId,
+        orElse: () => items.isNotEmpty ? items.first : _nullEntry(),
+      );
+      if (initial.id.isEmpty) initial = null;
+    } else if (items.isNotEmpty) {
+      initial = items.first;
     }
-  }
-
-  /// Switches the active image in a carousel.
-  void _selectImage(int index) {
-    if (index == _currentIndex) return;
+    if (!mounted) return;
     setState(() {
-      _currentIndex = index;
-      _croppedBytes = null;
-      _mode = _EditorMode.crop;
+      _library = items;
+      _loading = false;
     });
-    _updateImageInfo();
+    if (initial != null) await _selectImage(initial);
   }
 
-  /// Executes the crop operation on the current image.
+  Future<void> _selectImage(LibraryImage entry) async {
+    if (_selected?.id == entry.id) return;
+    final bytes = await LibraryService.readBytes(entry);
+    if (!mounted) return;
+    final decoded = img.decodeImage(bytes);
+    setState(() {
+      _selected = entry;
+      _originalBytes = bytes;
+      _editedBytes = null;
+      _mode = _EditorMode.crop;
+      _cropAspectRatio = null;
+      if (decoded != null) {
+        _widthController.text = decoded.width.toString();
+        _heightController.text = decoded.height.toString();
+        _originalAspect = decoded.width / decoded.height;
+      }
+    });
+  }
+
   void _performCrop() {
     setState(() => _isCropping = true);
     _cropController.crop();
   }
 
-  /// Called by CropController when crop completes.
   void _onCropped(Uint8List cropped) {
+    final decoded = img.decodeImage(cropped);
     setState(() {
-      _croppedBytes = cropped;
+      _editedBytes = cropped;
       _isCropping = false;
+      if (decoded != null) {
+        _widthController.text = decoded.width.toString();
+        _heightController.text = decoded.height.toString();
+      }
     });
-    _updateImageInfo();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Image cropped'),
-        duration: Duration(seconds: 1),
-      ),
-    );
+    _toast('Image cropped');
   }
 
-  /// Resets crop, returning to the original downloaded image.
-  void _resetCrop() {
+  void _resetEdits() {
     setState(() {
-      _croppedBytes = null;
+      _editedBytes = null;
+      final decoded = img.decodeImage(_originalBytes!);
+      if (decoded != null) {
+        _widthController.text = decoded.width.toString();
+        _heightController.text = decoded.height.toString();
+      }
     });
-    _updateImageInfo();
   }
 
-  /// Resizes the image to the dimensions specified in the text fields.
   void _performResize() {
     final w = int.tryParse(_widthController.text);
     final h = int.tryParse(_heightController.text);
-
     if (w == null || h == null || w <= 0 || h <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter valid width and height')),
-      );
+      _toast('Enter valid width and height');
       return;
     }
-
     if (w > 10000 || h > 10000) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Maximum dimension is 10000px')),
-      );
+      _toast('Maximum dimension is 10000px');
       return;
     }
-
-    final decoded = img.decodeImage(_activeBytes);
+    final decoded = img.decodeImage(_activeBytes!);
     if (decoded == null) return;
-
     final resized = ImageService.resize(
       decoded,
       width: w,
       height: h,
       maintainAspect: _maintainAspect,
     );
-
     setState(() {
-      _croppedBytes = ImageService.encodePng(resized);
+      _editedBytes = ImageService.encodePng(resized);
+      _widthController.text = resized.width.toString();
+      _heightController.text = resized.height.toString();
     });
-    _updateImageInfo();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Resized to ${resized.width}×${resized.height}'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+    _toast('Resized to ${resized.width}×${resized.height}');
   }
 
-  /// Handles width field changes when aspect ratio is locked.
   void _onWidthChanged(String value) {
     if (!_maintainAspect || _originalAspect == null) return;
     final w = int.tryParse(value);
@@ -154,7 +163,6 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// Handles height field changes when aspect ratio is locked.
   void _onHeightChanged(String value) {
     if (!_maintainAspect || _originalAspect == null) return;
     final h = int.tryParse(value);
@@ -163,160 +171,174 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// Saves the current image (cropped/resized) to the device.
-  Future<void> _saveImage({String format = 'png'}) async {
+  Future<void> _save() async {
+    final bytes = _activeBytes;
+    final entry = _selected;
+    if (bytes == null || entry == null) return;
     setState(() => _isSaving = true);
-
     try {
-      final decoded = img.decodeImage(_activeBytes);
+      final settings = await SettingsService.load();
+      final decoded = img.decodeImage(bytes);
       if (decoded == null) throw Exception('Failed to decode image');
-
-      final filename = ImageService.generateFilename(ext: format);
-      final bytes = format == 'jpg'
+      final encoded = settings.format == ImageFormat.jpeg
           ? ImageService.encodeJpeg(decoded, quality: 95)
           : ImageService.encodePng(decoded);
-
-      final path = await ImageService.saveImage(bytes, filename: filename);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Saved to $path'),
-            duration: const Duration(seconds: 3),
-            action: SnackBarAction(
-              label: 'OK',
-              onPressed: () {},
-            ),
-          ),
-        );
-      }
+      final filename = ImageService.generateFilename(
+        prefix: entry.shortcode,
+        ext: settings.format.extension,
+      );
+      final path = await ImageService.saveImage(
+        encoded,
+        filename: filename,
+        directory: settings.savePath,
+      );
+      _toast('Saved → $path', duration: const Duration(seconds: 3));
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: $e')),
-        );
-      }
+      _toast('Save failed: $e');
     } finally {
-      setState(() => _isSaving = false);
+      if (mounted) setState(() => _isSaving = false);
     }
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+  }
+
+  Future<void> _deleteSelected() async {
+    final entry = _selected;
+    if (entry == null) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove from library?'),
+        content: const Text(
+          'This deletes the original image file from the library. Your '
+          'saved exports are not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await LibraryService.delete(entry);
+    await _loadLibrary();
+  }
+
+  void _toast(String msg, {Duration duration = const Duration(seconds: 1)}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: duration),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final hasMultiple = widget.images.length > 1;
-    final hasCrop = _croppedBytes != null;
-
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          hasMultiple
-              ? 'Edit Image (${_currentIndex + 1}/${widget.images.length})'
-              : 'Edit Image',
-        ),
+        title: Text(_selected == null ? 'Library' : 'Editor'),
         actions: [
-          if (hasCrop)
+          if (_editedBytes != null)
             IconButton(
               icon: const Icon(Icons.undo),
-              tooltip: 'Reset to original',
-              onPressed: _resetCrop,
+              tooltip: 'Reset edits',
+              onPressed: _resetEdits,
             ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.save_alt),
+          IconButton(
+            icon: Icon(_infoVisible ? Icons.info : Icons.info_outline),
+            tooltip: _infoVisible ? 'Hide info' : 'Show info',
+            onPressed: () => setState(() => _infoVisible = !_infoVisible),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: _openSettings,
+          ),
+          IconButton(
+            icon: _isSaving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save_alt),
             tooltip: 'Save',
-            enabled: !_isSaving,
-            onSelected: (format) => _saveImage(format: format),
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'png', child: Text('Save as PNG')),
-              const PopupMenuItem(value: 'jpg', child: Text('Save as JPEG')),
-            ],
+            onPressed: _isSaving || _selected == null ? null : _save,
           ),
         ],
       ),
-      body: Column(
-        children: [
-          // Image carousel thumbnails
-          if (hasMultiple) _buildThumbnailStrip(theme),
-
-          // Mode selector
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: SegmentedButton<_EditorMode>(
-              segments: const [
-                ButtonSegment(
-                  value: _EditorMode.crop,
-                  icon: Icon(Icons.crop),
-                  label: Text('Crop'),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _LibraryRail(
+                  library: _library,
+                  selectedId: _selected?.id,
+                  onSelect: _selectImage,
+                  onDeleteSelected:
+                      _selected == null ? null : _deleteSelected,
                 ),
-                ButtonSegment(
-                  value: _EditorMode.resize,
-                  icon: Icon(Icons.photo_size_select_large),
-                  label: Text('Resize'),
+                Expanded(
+                  child: _selected == null
+                      ? const _EmptyEditorHint()
+                      : _buildEditor(),
                 ),
+                if (_infoVisible && _selected != null)
+                  _InfoPane(
+                    entry: _selected!,
+                    currentBytes: _activeBytes,
+                    edited: _editedBytes != null,
+                  ),
               ],
-              selected: {_mode},
-              onSelectionChanged: (modes) {
-                setState(() => _mode = modes.first);
-              },
             ),
-          ),
-
-          // Main editor area
-          Expanded(
-            child: _mode == _EditorMode.crop
-                ? _buildCropView(theme)
-                : _buildResizeView(theme),
-          ),
-        ],
-      ),
     );
   }
 
-  /// Builds the horizontal thumbnail strip for carousel posts.
-  Widget _buildThumbnailStrip(ThemeData theme) {
-    return Container(
-      height: 80,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        itemCount: widget.images.length,
-        itemBuilder: (_, index) {
-          final isActive = index == _currentIndex;
-          return GestureDetector(
-            onTap: () => _selectImage(index),
-            child: Container(
-              width: 64,
-              height: 64,
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: isActive
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.outline.withAlpha(80),
-                  width: isActive ? 2 : 1,
-                ),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Image.memory(
-                  widget.images[index].bytes,
-                  fit: BoxFit.cover,
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  /// Builds the interactive crop view using crop_your_image.
-  Widget _buildCropView(ThemeData theme) {
+  Widget _buildEditor() {
     return Column(
       children: [
-        // Aspect ratio presets
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: SegmentedButton<_EditorMode>(
+            segments: const [
+              ButtonSegment(
+                value: _EditorMode.crop,
+                icon: Icon(Icons.crop),
+                label: Text('Crop'),
+              ),
+              ButtonSegment(
+                value: _EditorMode.resize,
+                icon: Icon(Icons.photo_size_select_large),
+                label: Text('Resize'),
+              ),
+            ],
+            selected: {_mode},
+            onSelectionChanged: (modes) {
+              setState(() => _mode = modes.first);
+            },
+          ),
+        ),
+        Expanded(
+          child: _mode == _EditorMode.crop ? _buildCropView() : _buildResizeView(),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCropView() {
+    final theme = Theme.of(context);
+    return Column(
+      children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: SingleChildScrollView(
@@ -335,15 +357,15 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
         ),
         const SizedBox(height: 8),
-
-        // Crop area
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Crop(
-              key: ValueKey('$_currentIndex-$_cropAspectRatio-${_croppedBytes?.length}'),
+              key: ValueKey(
+                '${_selected?.id}-$_cropAspectRatio-${_editedBytes?.length}',
+              ),
               controller: _cropController,
-              image: _activeBytes,
+              image: _activeBytes!,
               aspectRatio: _cropAspectRatio,
               withCircleUi: false,
               onCropped: _onCropped,
@@ -356,8 +378,6 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
           ),
         ),
-
-        // Crop action button
         Padding(
           padding: const EdgeInsets.all(16),
           child: FilledButton.icon(
@@ -379,7 +399,6 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// Builds an aspect ratio chip for the crop preset row.
   Widget _aspectChip(String label, double? ratio) {
     final isSelected = _cropAspectRatio == ratio;
     return Padding(
@@ -387,31 +406,23 @@ class _EditorScreenState extends State<EditorScreen> {
       child: ChoiceChip(
         label: Text(label),
         selected: isSelected,
-        onSelected: (_) {
-          setState(() => _cropAspectRatio = ratio);
-        },
+        onSelected: (_) => setState(() => _cropAspectRatio = ratio),
       ),
     );
   }
 
-  /// Builds the resize controls view.
-  Widget _buildResizeView(ThemeData theme) {
+  Widget _buildResizeView() {
+    final theme = Theme.of(context);
     return Column(
       children: [
-        // Image preview
         Expanded(
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Center(
-              child: Image.memory(
-                _activeBytes,
-                fit: BoxFit.contain,
-              ),
+              child: Image.memory(_activeBytes!, fit: BoxFit.contain),
             ),
           ),
         ),
-
-        // Resize controls
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           child: Card(
@@ -446,11 +457,9 @@ class _EditorScreenState extends State<EditorScreen> {
                           tooltip: _maintainAspect
                               ? 'Unlock aspect ratio'
                               : 'Lock aspect ratio',
-                          onPressed: () {
-                            setState(() {
-                              _maintainAspect = !_maintainAspect;
-                            });
-                          },
+                          onPressed: () => setState(
+                            () => _maintainAspect = !_maintainAspect,
+                          ),
                         ),
                       ),
                       Expanded(
@@ -467,10 +476,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       ),
                     ],
                   ),
-
                   const SizedBox(height: 12),
-
-                  // Quick resize presets
                   SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
@@ -483,9 +489,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 12),
-
                   FilledButton.icon(
                     onPressed: _performResize,
                     icon: const Icon(Icons.photo_size_select_large),
@@ -503,7 +507,6 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// Builds a quick-resize preset chip.
   Widget _resizePresetChip(String label, int w, int h) {
     return Padding(
       padding: const EdgeInsets.only(right: 6),
@@ -518,6 +521,248 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
   }
+
+  static LibraryImage _nullEntry() => LibraryImage(
+        id: '',
+        sourceUrl: '',
+        shortcode: '',
+        carouselIndex: 0,
+        grabbedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        width: 0,
+        height: 0,
+        fileSize: 0,
+        filename: '',
+      );
 }
 
 enum _EditorMode { crop, resize }
+
+/// Vertical scrollable thumbnail strip on the left edge. Newest-first.
+class _LibraryRail extends StatelessWidget {
+  final List<LibraryImage> library;
+  final String? selectedId;
+  final Future<void> Function(LibraryImage) onSelect;
+  final Future<void> Function()? onDeleteSelected;
+
+  const _LibraryRail({
+    required this.library,
+    required this.selectedId,
+    required this.onSelect,
+    required this.onDeleteSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: 96,
+      decoration: BoxDecoration(
+        border: Border(right: BorderSide(color: theme.dividerColor)),
+      ),
+      child: Column(
+        children: [
+          Expanded(
+            child: library.isEmpty
+                ? const _EmptyLibraryHint()
+                : ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: library.length,
+                    itemBuilder: (_, i) {
+                      final entry = library[i];
+                      final active = entry.id == selectedId;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: GestureDetector(
+                          onTap: () => onSelect(entry),
+                          child: Container(
+                            height: 80,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: active
+                                    ? theme.colorScheme.primary
+                                    : theme.colorScheme.outline.withAlpha(80),
+                                width: active ? 2 : 1,
+                              ),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: Image.file(
+                                File(_pathFor(entry)),
+                                fit: BoxFit.cover,
+                                gaplessPlayback: true,
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          if (onDeleteSelected != null)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                tooltip: 'Remove from library',
+                onPressed: onDeleteSelected,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _pathFor(LibraryImage entry) {
+    final home = Platform.environment['HOME'] ?? '/tmp';
+    return p.join(
+      home,
+      '.local',
+      'share',
+      'InstaGrab',
+      'library',
+      entry.filename,
+    );
+  }
+}
+
+/// Right-side metadata panel describing the selected image.
+class _InfoPane extends StatelessWidget {
+  final LibraryImage entry;
+  final Uint8List? currentBytes;
+  final bool edited;
+
+  const _InfoPane({
+    required this.entry,
+    required this.currentBytes,
+    required this.edited,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final decoded = currentBytes != null ? img.decodeImage(currentBytes!) : null;
+    final curW = decoded?.width ?? entry.width;
+    final curH = decoded?.height ?? entry.height;
+
+    return Container(
+      width: 260,
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: theme.dividerColor)),
+      ),
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Image info', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 12),
+          _row(context, 'Original', '${entry.width} × ${entry.height}'),
+          _row(
+            context,
+            'Current',
+            '$curW × $curH${edited ? '  (edited)' : ''}',
+          ),
+          _row(context, 'Size on disk', _humanBytes(entry.fileSize)),
+          _row(context, 'Shortcode', entry.shortcode),
+          _row(context, 'Carousel index', '${entry.carouselIndex}'),
+          _row(context, 'Grabbed', _formatDate(entry.grabbedAt)),
+          const SizedBox(height: 12),
+          Text('Source', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          SelectableText(
+            entry.sourceUrl,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.primary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _row(BuildContext context, String k, String v) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(
+              k,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(child: Text(v, style: theme.textTheme.bodySmall)),
+        ],
+      ),
+    );
+  }
+
+  String _humanBytes(int n) {
+    if (n < 1024) return '$n B';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  String _formatDate(DateTime d) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+}
+
+class _EmptyEditorHint extends StatelessWidget {
+  const _EmptyEditorHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.photo_library_outlined,
+              size: 64,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Library is empty',
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Go back and grab an Instagram post to add images.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyLibraryHint extends StatelessWidget {
+  const _EmptyLibraryHint();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(8),
+        child: Text(
+          'Empty',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 11),
+        ),
+      ),
+    );
+  }
+}

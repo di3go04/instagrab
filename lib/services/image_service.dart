@@ -34,7 +34,7 @@ class ImageService {
       }
 
       if (response.bodyBytes.isEmpty) {
-        throw ImageDownloadException('Downloaded image is empty');
+        throw const ImageDownloadException('Downloaded image is empty');
       }
 
       return response.bodyBytes;
@@ -140,12 +140,21 @@ class ImageService {
 
   /// Saves image bytes to a file and returns the file path.
   ///
-  /// [filename] should include the extension (.png, .jpg).
+  /// [filename] should include the extension (.png, .jpg). If
+  /// [directory] is provided, it's used (and created if missing);
+  /// otherwise the platform-default path is used.
   static Future<String> saveImage(
     Uint8List bytes, {
     required String filename,
+    String? directory,
   }) async {
-    final dir = await getOutputDirectory();
+    final Directory dir;
+    if (directory != null) {
+      dir = Directory(directory);
+      if (!await dir.exists()) await dir.create(recursive: true);
+    } else {
+      dir = await getOutputDirectory();
+    }
     final file = File(p.join(dir.path, filename));
     await file.writeAsBytes(bytes);
     return file.path;

@@ -1,0 +1,5 @@
+package com.djb.insta_grab
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
