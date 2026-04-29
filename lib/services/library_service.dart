@@ -143,6 +143,35 @@ class LibraryService {
     return file.readAsBytes();
   }
 
+  /// Overwrites a library entry's image bytes and updates its metadata.
+  ///
+  /// Keeps the same filename/id so the entry stays in place in the strip.
+  static Future<LibraryImage> update({
+    required LibraryImage entry,
+    required Uint8List bytes,
+  }) async {
+    final file = File(p.join(_libraryDir.path, entry.filename));
+    await file.writeAsBytes(bytes);
+
+    final decoded = img.decodeImage(bytes);
+    final updated = LibraryImage(
+      id: entry.id,
+      sourceUrl: entry.sourceUrl,
+      shortcode: entry.shortcode,
+      carouselIndex: entry.carouselIndex,
+      grabbedAt: entry.grabbedAt,
+      width: decoded?.width ?? entry.width,
+      height: decoded?.height ?? entry.height,
+      fileSize: bytes.length,
+      filename: entry.filename,
+    );
+
+    final items = await list();
+    final replaced = items.map((e) => e.id == entry.id ? updated : e).toList();
+    await _writeIndex(replaced);
+    return updated;
+  }
+
   /// Removes an entry from the index and deletes its on-disk file.
   static Future<void> delete(LibraryImage entry) async {
     final file = File(p.join(_libraryDir.path, entry.filename));

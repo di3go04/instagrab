@@ -39,6 +39,7 @@ class _EditorScreenState extends State<EditorScreen> {
   _EditorMode _mode = _EditorMode.crop;
   final _cropController = CropController();
   double? _cropAspectRatio;
+  bool _cropActive = false;
 
   final _widthController = TextEditingController();
   final _heightController = TextEditingController();
@@ -91,6 +92,7 @@ class _EditorScreenState extends State<EditorScreen> {
       _editedBytes = null;
       _mode = _EditorMode.crop;
       _cropAspectRatio = null;
+      _cropActive = false;
       if (decoded != null) {
         _widthController.text = decoded.width.toString();
         _heightController.text = decoded.height.toString();
@@ -120,6 +122,7 @@ class _EditorScreenState extends State<EditorScreen> {
   void _resetEdits() {
     setState(() {
       _editedBytes = null;
+      _cropActive = false;
       final decoded = img.decodeImage(_originalBytes!);
       if (decoded != null) {
         _widthController.text = decoded.width.toString();
@@ -175,6 +178,10 @@ class _EditorScreenState extends State<EditorScreen> {
     final bytes = _activeBytes;
     final entry = _selected;
     if (bytes == null || entry == null) return;
+    if (_editedBytes == null) {
+      _toast('No edits to save');
+      return;
+    }
     setState(() => _isSaving = true);
     try {
       final settings = await SettingsService.load();
@@ -192,6 +199,26 @@ class _EditorScreenState extends State<EditorScreen> {
         filename: filename,
         directory: settings.savePath,
       );
+
+      // Update the library entry so the rail shows the edited version.
+      final libraryBytes = ImageService.encodeJpeg(decoded, quality: 95);
+      final updatedEntry = await LibraryService.update(
+        entry: entry,
+        bytes: libraryBytes,
+      );
+      final items = await LibraryService.list();
+      if (mounted) {
+        setState(() {
+          _library = items;
+          _selected = updatedEntry;
+          _originalBytes = libraryBytes;
+          _editedBytes = null;
+          _originalAspect = updatedEntry.width / updatedEntry.height;
+          _widthController.text = updatedEntry.width.toString();
+          _heightController.text = updatedEntry.height.toString();
+        });
+      }
+
       _toast('Saved → $path', duration: const Duration(seconds: 3));
     } catch (e) {
       _toast('Save failed: $e');
@@ -258,6 +285,12 @@ class _EditorScreenState extends State<EditorScreen> {
             tooltip: _infoVisible ? 'Hide info' : 'Show info',
             onPressed: () => setState(() => _infoVisible = !_infoVisible),
           ),
+          if (_selected != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: 'Remove from library',
+              onPressed: _deleteSelected,
+            ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Settings',
@@ -270,7 +303,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.save_alt),
+                : const Icon(Icons.save),
             tooltip: 'Save',
             onPressed: _isSaving || _selected == null ? null : _save,
           ),
@@ -284,9 +317,8 @@ class _EditorScreenState extends State<EditorScreen> {
                 _LibraryRail(
                   library: _library,
                   selectedId: _selected?.id,
+                  selectedBytes: _originalBytes,
                   onSelect: _selectImage,
-                  onDeleteSelected:
-                      _selected == null ? null : _deleteSelected,
                 ),
                 Expanded(
                   child: _selected == null
@@ -360,28 +392,53 @@ class _EditorScreenState extends State<EditorScreen> {
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Crop(
-              key: ValueKey(
-                '${_selected?.id}-$_cropAspectRatio-${_editedBytes?.length}',
-              ),
-              controller: _cropController,
-              image: _activeBytes!,
-              aspectRatio: _cropAspectRatio,
-              withCircleUi: false,
-              onCropped: _onCropped,
-              initialSize: 0.8,
-              maskColor: Colors.black.withAlpha(180),
-              baseColor: theme.colorScheme.surface,
-              cornerDotBuilder: (size, edgeAlignment) => DotControl(
-                color: theme.colorScheme.primary,
-              ),
-            ),
+            child: _cropActive
+                ? Crop(
+                    key: ValueKey(
+                      '${_selected?.id}-$_cropAspectRatio-${_editedBytes?.length}',
+                    ),
+                    controller: _cropController,
+                    image: _activeBytes!,
+                    aspectRatio: _cropAspectRatio,
+                    withCircleUi: false,
+                    onCropped: _onCropped,
+                    initialSize: 0.8,
+                    maskColor: Colors.black.withAlpha(180),
+                    baseColor: theme.colorScheme.surface,
+                    cornerDotBuilder: (size, edgeAlignment) => DotControl(
+                      color: theme.colorScheme.primary,
+                    ),
+                  )
+                : GestureDetector(
+                    onTapDown: (_) => setState(() => _cropActive = true),
+                    onPanStart: (_) => setState(() => _cropActive = true),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Image.memory(_activeBytes!, fit: BoxFit.contain),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            'Tap to select crop area',
+                            style: TextStyle(color: Colors.white, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
           ),
         ),
         Padding(
           padding: const EdgeInsets.all(16),
           child: FilledButton.icon(
-            onPressed: _isCropping ? null : _performCrop,
+            onPressed: _isCropping || !_cropActive ? null : _performCrop,
             icon: _isCropping
                 ? const SizedBox(
                     width: 20,
@@ -481,11 +538,12 @@ class _EditorScreenState extends State<EditorScreen> {
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        _resizePresetChip('1080×1080', 1080, 1080),
-                        _resizePresetChip('1080×1350', 1080, 1350),
-                        _resizePresetChip('1920×1080', 1920, 1080),
-                        _resizePresetChip('800×800', 800, 800),
-                        _resizePresetChip('500×500', 500, 500),
+                        _resizePresetChip('240×320', 240, 320),
+                        _resizePresetChip('480×640 (Feature Phone)', 480, 640),
+                        _resizePresetChip('600×800', 600, 800),
+                        _resizePresetChip('750×1000 (iPhone 6 to 8)', 750, 1000),
+                        _resizePresetChip('768×1024 (Old Android)', 768, 1024),
+                        _resizePresetChip('960×1280', 960, 1280),
                       ],
                     ),
                   ),
@@ -541,14 +599,14 @@ enum _EditorMode { crop, resize }
 class _LibraryRail extends StatelessWidget {
   final List<LibraryImage> library;
   final String? selectedId;
+  final Uint8List? selectedBytes;
   final Future<void> Function(LibraryImage) onSelect;
-  final Future<void> Function()? onDeleteSelected;
 
   const _LibraryRail({
     required this.library,
     required this.selectedId,
+    required this.selectedBytes,
     required this.onSelect,
-    required this.onDeleteSelected,
   });
 
   @override
@@ -587,11 +645,17 @@ class _LibraryRail extends StatelessWidget {
                             ),
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(6),
-                              child: Image.file(
-                                File(_pathFor(entry)),
-                                fit: BoxFit.cover,
-                                gaplessPlayback: true,
-                              ),
+                              child: active && selectedBytes != null
+                                  ? Image.memory(
+                                      selectedBytes!,
+                                      fit: BoxFit.cover,
+                                      gaplessPlayback: true,
+                                    )
+                                  : Image.file(
+                                      File(_pathFor(entry)),
+                                      fit: BoxFit.cover,
+                                      gaplessPlayback: true,
+                                    ),
                             ),
                           ),
                         ),
@@ -599,15 +663,6 @@ class _LibraryRail extends StatelessWidget {
                     },
                   ),
           ),
-          if (onDeleteSelected != null)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                tooltip: 'Remove from library',
-                onPressed: onDeleteSelected,
-              ),
-            ),
         ],
       ),
     );
