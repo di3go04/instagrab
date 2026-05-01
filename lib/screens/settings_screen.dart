@@ -16,6 +16,8 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   SettingsSnapshot? _current;
   final _pathController = TextEditingController();
+  final _apiKeyController = TextEditingController();
+  final _apiUrlController = TextEditingController();
 
   @override
   void initState() {
@@ -26,6 +28,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     _pathController.dispose();
+    _apiKeyController.dispose();
+    _apiUrlController.dispose();
     super.dispose();
   }
 
@@ -35,6 +39,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _current = snap;
       _pathController.text = snap.savePath;
+      _apiKeyController.text = snap.wanlyApiKey;
+      _apiUrlController.text = snap.wanlyApiUrl;
     });
   }
 
@@ -65,6 +71,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _setFormat(ImageFormat format) async {
     await SettingsService.update(format: format);
+    await _reload();
+  }
+
+  Future<void> _saveApiKey() async {
+    await SettingsService.update(wanlyApiKey: _apiKeyController.text.trim());
+    await _reload();
+  }
+
+  Future<void> _saveApiUrl() async {
+    await SettingsService.update(wanlyApiUrl: _apiUrlController.text.trim());
     await _reload();
   }
 
@@ -132,6 +148,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     groupValue: current.format,
                     onChanged: (v) => v == null ? null : _setFormat(v),
                   ),
+                const SizedBox(height: 32),
+                Text('Wanly API', style: theme.textTheme.titleMedium),
+                const SizedBox(height: 4),
+                Text(
+                  'Configure the Wanly API integration.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _apiKeyController,
+                        decoration: const InputDecoration(
+                          labelText: 'API Key',
+                          isDense: true,
+                        ),
+                        onSubmitted: (_) => _saveApiKey(),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.check),
+                      tooltip: 'Save API key',
+                      onPressed: _saveApiKey,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _apiUrlController,
+                        decoration: const InputDecoration(
+                          labelText: 'API URL',
+                          isDense: true,
+                        ),
+                        onSubmitted: (_) => _saveApiUrl(),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.check),
+                      tooltip: 'Save API URL',
+                      onPressed: _saveApiUrl,
+                    ),
+                  ],
+                ),
               ],
             ),
     );

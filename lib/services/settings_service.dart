@@ -20,6 +20,9 @@ enum ImageFormat {
 class SettingsService {
   static const _keySavePath = 'save_path';
   static const _keyFormat = 'default_format';
+  static const _keyWanlyApiKey = 'wanly_api_key';
+  static const _keyWanlyApiUrl = 'wanly_api_url';
+  static const _defaultWanlyApiUrl = 'http://api.wanly22.com:8001';
 
   /// Returns the current settings, filling in defaults for anything unset.
   static Future<SettingsSnapshot> load() async {
@@ -30,17 +33,32 @@ class SettingsService {
       (f) => f.name == formatName,
       orElse: () => ImageFormat.png,
     );
-    return SettingsSnapshot(savePath: savePath, format: format);
+    final apiKey = prefs.getString(_keyWanlyApiKey) ?? '';
+    final apiUrl = prefs.getString(_keyWanlyApiUrl) ?? _defaultWanlyApiUrl;
+    return SettingsSnapshot(
+      savePath: savePath,
+      format: format,
+      wanlyApiKey: apiKey,
+      wanlyApiUrl: apiUrl,
+    );
   }
 
   /// Updates any provided fields; omits are left unchanged.
   static Future<SettingsSnapshot> update({
     String? savePath,
     ImageFormat? format,
+    String? wanlyApiKey,
+    String? wanlyApiUrl,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     if (savePath != null) await prefs.setString(_keySavePath, savePath);
     if (format != null) await prefs.setString(_keyFormat, format.name);
+    if (wanlyApiKey != null) {
+      await prefs.setString(_keyWanlyApiKey, wanlyApiKey);
+    }
+    if (wanlyApiUrl != null) {
+      await prefs.setString(_keyWanlyApiUrl, wanlyApiUrl);
+    }
     return load();
   }
 
@@ -54,5 +72,12 @@ class SettingsService {
 class SettingsSnapshot {
   final String savePath;
   final ImageFormat format;
-  const SettingsSnapshot({required this.savePath, required this.format});
+  final String wanlyApiKey;
+  final String wanlyApiUrl;
+  const SettingsSnapshot({
+    required this.savePath,
+    required this.format,
+    required this.wanlyApiKey,
+    required this.wanlyApiUrl,
+  });
 }
