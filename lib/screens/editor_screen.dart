@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:crop_your_image/crop_your_image.dart' hide ImageFormat;
+import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import '../services/image_service.dart';
@@ -682,7 +684,7 @@ class _LibraryRail extends StatelessWidget {
 }
 
 /// Right-side metadata panel describing the selected image.
-class _InfoPane extends StatelessWidget {
+class _InfoPane extends StatefulWidget {
   final LibraryImage entry;
   final Uint8List? currentBytes;
   final bool edited;
@@ -694,11 +696,181 @@ class _InfoPane extends StatelessWidget {
   });
 
   @override
+  State<_InfoPane> createState() => _InfoPaneState();
+}
+
+class _InfoPaneState extends State<_InfoPane> {
+  List<String> _folderNames = [];
+  String? _selectedFolder;
+  bool _loadingFolders = false;
+  String? _folderError;
+  bool _uploading = false;
+
+  Uint8List? get _bytes => widget.currentBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFolders();
+  }
+
+  @override
+  void didUpdateWidget(covariant _InfoPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.entry.id != widget.entry.id) {
+      _loadFolders();
+    }
+  }
+
+  Future<void> _loadFolders() async {
+    final settings = await SettingsService.load();
+    if (settings.wanlyApiUrl.isEmpty) return;
+    setState(() {
+      _loadingFolders = true;
+      _folderError = null;
+    });
+    try {
+      final uri = Uri.parse('${settings.wanlyApiUrl}/images/folders');
+      final response = await http.get(uri, headers: {
+        if (settings.wanlyApiKey.isNotEmpty)
+          'X-API-Key': settings.wanlyApiKey,
+      }).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as List<dynamic>;
+        setState(() {
+          _folderNames = data
+              .map((e) => (e as Map<String, dynamic>)['name']?.toString() ?? '')
+              .where((n) => n.isNotEmpty)
+              .toList();
+        });
+      } else {
+        setState(() => _folderError = 'HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _folderError = e.toString());
+    }
+    if (mounted) setState(() => _loadingFolders = false);
+  }
+
+  Future<void> _upload() async {
+    final bytes = _bytes;
+    if (_selectedFolder == null || bytes == null) return;
+    final settings = await SettingsService.load();
+    if (settings.wanlyApiUrl.isEmpty) return;
+    setState(() => _uploading = true);
+    try {
+      final uri = Uri.parse('${settings.wanlyApiUrl}/images/upload');
+      final request = http.MultipartRequest('POST', uri);
+      if (settings.wanlyApiKey.isNotEmpty) {
+        request.headers['X-API-Key'] = settings.wanlyApiKey;
+      }
+      request.fields['folder'] = _selectedFolder!;
+      request.files.add(http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: '${widget.entry.shortcode}.jpg',
+      ));
+      final streamed = await request.send().timeout(const Duration(seconds: 30));
+      final response = await http.Response.fromStream(streamed);
+      if (response.statusCode == 200) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Uploaded to Wanly'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } else {
+        if (mounted) _showError('Upload failed: HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) _showError('Upload failed: $e');
+    }
+    if (mounted) setState(() => _uploading = false);
+  }
+
+  void _showError(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  Widget _buildFolderDropdown(ThemeData theme) {
+    if (_loadingFolders) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 8),
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_folderError != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              _folderError!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
+          TextButton.icon(
+            onPressed: _loadFolders,
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('Retry'),
+          ),
+        ],
+      );
+    }
+    if (_folderNames.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Text(
+          'No folders found',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Folder',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 4),
+          DropdownButton<String>(
+            value: _folderNames.contains(_selectedFolder) ? _selectedFolder : null,
+            isExpanded: true,
+            hint: const Text('Select folder'),
+            items: _folderNames.map((n) {
+              return DropdownMenuItem(value: n, child: Text(n));
+            }).toList(),
+            onChanged: (v) => setState(() => _selectedFolder = v),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final decoded = currentBytes != null ? img.decodeImage(currentBytes!) : null;
-    final curW = decoded?.width ?? entry.width;
-    final curH = decoded?.height ?? entry.height;
+    final decoded = _bytes != null ? img.decodeImage(_bytes!) : null;
+    final curW = decoded?.width ?? widget.entry.width;
+    final curH = decoded?.height ?? widget.entry.height;
 
     return Container(
       width: 260,
@@ -710,24 +882,41 @@ class _InfoPane extends StatelessWidget {
         children: [
           Text('Image info', style: theme.textTheme.titleMedium),
           const SizedBox(height: 12),
-          _row(context, 'Original', '${entry.width} × ${entry.height}'),
+          _row(context, 'Original', '${widget.entry.width} × ${widget.entry.height}'),
           _row(
             context,
             'Current',
-            '$curW × $curH${edited ? '  (edited)' : ''}',
+            '$curW × $curH${widget.edited ? '  (edited)' : ''}',
           ),
-          _row(context, 'Size on disk', _humanBytes(entry.fileSize)),
-          _row(context, 'Shortcode', entry.shortcode),
-          _row(context, 'Carousel index', '${entry.carouselIndex}'),
-          _row(context, 'Grabbed', _formatDate(entry.grabbedAt)),
+          _row(context, 'Size on disk', _humanBytes(widget.entry.fileSize)),
+          _row(context, 'Shortcode', widget.entry.shortcode),
+          _row(context, 'Carousel index', '${widget.entry.carouselIndex}'),
+          _row(context, 'Grabbed', _formatDate(widget.entry.grabbedAt)),
           const SizedBox(height: 12),
           Text('Source', style: theme.textTheme.titleSmall),
           const SizedBox(height: 4),
           SelectableText(
-            entry.sourceUrl,
+            widget.entry.sourceUrl,
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.primary,
             ),
+          ),
+          const Divider(height: 32),
+          Text('Wanly', style: theme.textTheme.titleSmall),
+          _buildFolderDropdown(theme),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: _uploading || _selectedFolder == null || _bytes == null
+                ? null
+                : _upload,
+            icon: _uploading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_upload_outlined),
+            label: Text(_uploading ? 'Uploading...' : 'Upload to Wanly'),
           ),
         ],
       ),
