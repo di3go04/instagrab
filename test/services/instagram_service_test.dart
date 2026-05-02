@@ -40,5 +40,32 @@ void main() {
     test('8. Debería retornar null para strings vacíos', () {
       expect(InstagramService.normalizeUrl(''), isNull);
     });
+
+    group('shortcodeToMediaId', () {
+      test('should return "1" when shortcode is "B"', () {
+        final result = InstagramService.shortcodeToMediaId('B');
+        expect(result, equals('1'));
+      });
+
+      test('should correctly decode a known real shortcode', () {
+        // Real example: /p/Ct_7366MA_u/ -> media_id: 3134487193241784302
+        final result = InstagramService.shortcodeToMediaId('Ct_7366MA_u');
+        expect(result, equals('3134487193241784302'));
+      });
+
+      test('should throw InstagramExtractionException when shortcode is empty', () {
+        expect(
+          () => InstagramService.shortcodeToMediaId(''),
+          throwsA(isA<InstagramExtractionException>()),
+        );
+      });
+
+      test('should throw InstagramExtractionException when shortcode is invalid', () {
+        expect(
+          () => InstagramService.shortcodeToMediaId('!!!invalid'),
+          throwsA(isA<InstagramExtractionException>()),
+        );
+      });
+    });
   });
 }
